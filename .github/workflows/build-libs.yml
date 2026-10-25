@@ -3,16 +3,20 @@ name: 编译定制media3-aar
 on:
   workflow_dispatch:
   push:
-    branches: [release-1.11.0-fongmi]
+    branches: [release]
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
-      - name: 检出定制分支
+      - name: 检出定制分支源码（FongMi/media 上游 release-1.11.0-fongmi）
         uses: actions/checkout@v4
         with:
+          repository: FongMi/media
           ref: release-1.11.0-fongmi
           fetch-depth: 1
 
@@ -26,50 +30,49 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" > /dev/null
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" > /dev/null 2>&1 || \
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;26.3.11579264" > /dev/null 2>&1 || true
-          echo "NDK_VERSION=$ANDROID_NDK_HOME"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" > /dev/null 2>&1
+          if [ ! -d "$ANDROID_HOME/ndk/27.0.12077973" ]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;26.3.11579264" > /dev/null 2>&1 || true
+          fi
+          ls "$ANDROID_HOME/ndk" || true
 
-      - name: 编译 19 个 media3 模块（含定制 mpvplayer/ui_danmaku/iso/libass）
+      - name: 设置 NDK 环境变量
+        run: |
+          if [ -d "$ANDROID_HOME/ndk/27.0.12077973" ]; then
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+            echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          elif [ -d "$ANDROID_HOME/ndk/26.3.11579264" ]; then
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+            echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          fi
+
+      - name: 动态发现全部 lib-* 模块并编译 release aar（含定制 mpvplayer/ui_danmaku/leanback/ffmpeg）
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx6g \
-            :lib-common:assembleRelease \
-            :lib-container:assembleRelease \
-            :lib-database:assembleRelease \
-            :lib-datasource:assembleRelease \
-            :lib-datasource-okhttp:assembleRelease \
-            :lib-decoder:assembleRelease \
-            :lib-effect:assembleRelease \
-            :lib-exoplayer:assembleRelease \
-            :lib-exoplayer-dash:assembleRelease \
-            :lib-exoplayer-hls:assembleRelease \
-            :lib-exoplayer-rtsp:assembleRelease \
-            :lib-exoplayer-smoothstreaming:assembleRelease \
-            :lib-extractor:assembleRelease \
-            :lib-mpvplayer:assembleRelease \
-            :lib-session:assembleRelease \
-            :lib-ui:assembleRelease \
-            :lib-ui-danmaku:assembleRelease \
-            :lib-ui-leanback:assembleRelease \
-            :lib-decoder-ffmpeg:assembleRelease
+          PROJECTS=$(./gradlew --no-daemon -q projects 2>/dev/null | grep -oP "Project ':\K[^']+" | grep '^lib-' | sed 's/$/:assembleRelease/' | tr '\n' ' ')
+          echo "待编译模块: $PROJECTS"
+          if [ -z "$PROJECTS" ]; then echo "::error::未发现任何 lib-* 模块，源码分支可能不对"; exit 1; fi
+          ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx5g --stacktrace $PROJECTS
 
-      - name: 收集 aar 并推送到 libs 分支
+      - name: 收集 aar 并推送到 libs 分支（Shaqudabao/media）
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p libs-out
-          find libraries -path "*/buildout/outputs/aar/*-release.aar" -exec cp {} libs-out/ \;
+          mkdir -p /tmp/aar-out
+          find libraries -path "*/buildout/outputs/aar/*-release.aar" -exec cp {} /tmp/aar-out/ \;
           echo "=== 产物清单 ==="
-          ls -la libs-out/
-          COUNT=$(ls libs-out/*.aar 2>/dev/null | wc -l)
+          ls -la /tmp/aar-out/
+          COUNT=$(ls /tmp/aar-out/*.aar 2>/dev/null | wc -l)
           echo "aar 数量: $COUNT"
-          if [ "$COUNT" -lt 19 ]; then echo "::error::aar 数量不足 19 个，编译可能不完整"; exit 1; fi
+          if [ "$COUNT" -lt 10 ]; then echo "::error::aar 数量过少（<$COUNT），编译可能不完整"; exit 1; fi
           git config user.name "github-actions"
           git config user.email "actions@github.com"
+          git remote set-url origin "https://x-access-token:${TOKEN}@github.com/Shaqudabao/media.git"
           git checkout --orphan libs-tmp
           git reset -q
-          find . -maxdepth 1 -mindepth 1 ! -name libs-out ! -name .git -exec rm -rf {} +
-          cp libs-out/*.aar .
-          rm -rf libs-out
+          find . -maxdepth 1 -mindepth 1 ! -name .git -exec rm -rf {} +
+          cp /tmp/aar-out/*.aar .
+          ls -la
           git add -A
           git commit -q -m "media3 aar $(date -u +%Y-%m-%dT%H:%MZ)"
           git branch -D libs > /dev/null 2>&1 || true

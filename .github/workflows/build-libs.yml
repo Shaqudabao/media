@@ -1,0 +1,78 @@
+name: 编译定制media3-aar
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release-1.11.0-fongmi]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: 检出定制分支
+        uses: actions/checkout@v4
+        with:
+          ref: release-1.11.0-fongmi
+          fetch-depth: 1
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 安装 Android SDK 36 与 NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" > /dev/null 2>&1 || \
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;26.3.11579264" > /dev/null 2>&1 || true
+          echo "NDK_VERSION=$ANDROID_NDK_HOME"
+
+      - name: 编译 19 个 media3 模块（含定制 mpvplayer/ui_danmaku/iso/libass）
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx6g \
+            :lib-common:assembleRelease \
+            :lib-container:assembleRelease \
+            :lib-database:assembleRelease \
+            :lib-datasource:assembleRelease \
+            :lib-datasource-okhttp:assembleRelease \
+            :lib-decoder:assembleRelease \
+            :lib-effect:assembleRelease \
+            :lib-exoplayer:assembleRelease \
+            :lib-exoplayer-dash:assembleRelease \
+            :lib-exoplayer-hls:assembleRelease \
+            :lib-exoplayer-rtsp:assembleRelease \
+            :lib-exoplayer-smoothstreaming:assembleRelease \
+            :lib-extractor:assembleRelease \
+            :lib-mpvplayer:assembleRelease \
+            :lib-session:assembleRelease \
+            :lib-ui:assembleRelease \
+            :lib-ui-danmaku:assembleRelease \
+            :lib-ui-leanback:assembleRelease \
+            :lib-decoder-ffmpeg:assembleRelease
+
+      - name: 收集 aar 并推送到 libs 分支
+        run: |
+          mkdir -p libs-out
+          find libraries -path "*/buildout/outputs/aar/*-release.aar" -exec cp {} libs-out/ \;
+          echo "=== 产物清单 ==="
+          ls -la libs-out/
+          COUNT=$(ls libs-out/*.aar 2>/dev/null | wc -l)
+          echo "aar 数量: $COUNT"
+          if [ "$COUNT" -lt 19 ]; then echo "::error::aar 数量不足 19 个，编译可能不完整"; exit 1; fi
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git checkout --orphan libs-tmp
+          git reset -q
+          find . -maxdepth 1 -mindepth 1 ! -name libs-out ! -name .git -exec rm -rf {} +
+          cp libs-out/*.aar .
+          rm -rf libs-out
+          git add -A
+          git commit -q -m "media3 aar $(date -u +%Y-%m-%dT%H:%MZ)"
+          git branch -D libs > /dev/null 2>&1 || true
+          git branch -m libs
+          git push -f origin libs
+          echo "=== libs 分支已更新 ==="
